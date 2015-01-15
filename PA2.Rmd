@@ -1,0 +1,240 @@
+---
+title: "Tornado, worst weather disaster in the US"
+author: Table of Contents
+output: 
+  html_document:
+    keep_md: true
+    theme: united
+    highlight: pygments
+    toc: TRUE
+---
+## Synopsis
+While exploring the National Oceanic and Atmospheric Administration’s (NOAA) [storm database][1] with records of major storm and severe weather events in the United States from 1950 to 2011, in an effort to identify the main weather disasters that have worst negative impact on both public health and the economy at large, Tornadoes were found to loom above other force majeure given the impact they have on our lives.
+
+## Data processing
+The database was collected during many years, manually and by different people, although the [consolidated instructions][1] aimed at having coherent data, it probably evolved and thus failed providing consistent naming conventions and probably also measurements. 
+
+This paper is an effort in interpreting some of the values in the database. We relied upon [publishd CodeBook][2] but it was found not to be complete. However, when a decision was made about the data we strive at least to make it explicit.
+
+The first assumptions are:
++ Events do not overlap. For example FLOOD is not a super group of RIVER FLOOD
++ Summary information rows in the DB do have overlapping information and are safe to discard
+
+The Data processing section iterates to transformation of the data from it's acquisition (Download) stage to the exploration stage, where it is ready to be explored.
+
+### Setup
+#### Add common functionality
+
+Add a function to aid in loading required packages. If the package is absent it will install it before it is loaded. 
+```{r utility.load.libraries}
+requires <- function(pkg) {
+  sapply(pkg, function(p) {
+      if (!is.element(pkg, .packages(all.available = TRUE))) 
+        { print ("Install"); install.packages(pkg, repos="http://cran.rstudio.com/") }
+      suppressMessages(library(pkg, character.only = TRUE))
+    })
+  invisible()
+}
+```
+
+#### Required Libraries
+```{r dependencies}
+requires('knitr')
+requires('ggplot2')
+requires('reshape2')
+opts_chunk$set(cache=TRUE)
+```
+
+### Reading the CSV file
+Download and unzip the remote data collection. If the file already exists in local directory this code is not skipped.
+```{r prepare.local.csv}
+data.file <- 'StormData.csv.bz2'
+data.url  <- 'http://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2'
+if(!file.exists(data.file))
+  download.file(data.url, destfile=data.file)
+
+data.file.unzipped <- sub('.bz2', '', data.file)
+if(!file.exists(data.file.unzipped)) {
+  requires('R.utils')  # For bunzip2. load only if required
+  bunzip2(data.file, overwrite=FALSE, remove=FALSE) 
+}
+```
+
+Now that we have the CSV file locally we can start reading it into memory
+However, we do not ready it fully. We are interested only in the following
+columns.
+
++ `EVTYPE` - The event type (factor)
++ `FATALTEIS` - The number of casualties (integer)
++ `INJURIES` - The number of injured people (integer)
++ `PROPDMG` - The property damage in US$ (to be multiplied by PROPDMGEXP)
++ `PROPDMGEXP` - The property damage units.
++ `CROPDMG` - Damage to crop value in US$ (to be multiplied by CROPDMGEXP)
++ `CROPDMGEXP` - The crop damage units.
+
+We create a `data.frame` called `info` that can map each of 
+the columns of interest to it's desired type and name.
+```{r info.for.reading}
+info <- data.frame(
+  col  = c("EVTYPE", "FATALITIES", "INJURIES", "PROPDMG", "PROPDMGEXP","CROPDMG", "CROPDMGEXP"),
+  name = c("event", "fatalties", "injuries", "prop.dmg", "prop.dmg.unit", "crop.dmg", "crop.dmg.unit"),
+  type = c("factor", "numeric", "numeric", "numeric", "character", "numeric", "character"),
+  stringsAsFactors = FALSE)
+```
+
+We use the `info data.frame` to load only the columns we want, 
+and already set their desired `type` and `name`.
+By selective reading we avoid using a larger memory footprint than strictly necessary. 
+```{r reading}
+header <- names(read.csv(data.file.unzipped, nrow = 2, header = TRUE))
+df <- read.csv(data.file.unzipped,
+               colClasses = ifelse(header %in% info$col, info$type, "NULL"),
+               col.names  = ifelse(header %in% info$col, info$name, "NULL"))
+```
+
+### Cleanup 
+The Event types suffer from the following shortcomings 
++ upper/lower case mix up
++ redundant spaces
++ redundant characters
++ naming inconsistencies
++ singular vs plurals
++ names sometimes contains units (mostly not)
++ naming inconsistently containing variables
+Here under are the text processing used to make sure we can join all
+related columns together 
+```{r cleanup.event.name}
+df$event <- tolower(df$event)
+df$event <- gsub('/|,', ' ', df$event)              # Separator 
+df$event <- gsub('\\(|\\)|\\.|-|&', '', df$event)   # invalid chars
+df$event <- gsub('\\\\', ' ', df$event)             # Backslash
+df$event <- gsub('no ', 'non', df$event)            # consolidate no
+df$event <- gsub(' G', ' ', df$event)               # G Format del
+df$event <- gsub(' AND^', '', df$event)             # And at end 
+df$event <- gsub('trees', 'tree', df$event)         # plural
+df$event <- gsub(' gust', '', df$event)             # inconsitencies
+df$event <- gsub('w inds|windss|winds|wins|wnd', 'wind ', df$event)
+df$event <- gsub('tornadoes', 'tornado', df$event)  # plural
+df$event <- gsub('tornado f.*', 'tornado', df$event)# plural
+df$event <- gsub('mph^', '', df$event)              # units in name
+df$event <- gsub('thunderstorms|tstm', 'thunderstorm', df$event)
+df$event <- gsub('[0-9]', '', df$event)             # rm numbers
+df$event <- gsub('[ ]+', ' ', df$event)             # shrink spaces
+df$event <- gsub('^[ ]+', '', df$event)             # start spaces
+df$event <- gsub('[ ]+$', '', df$event)             # end spaces
+```
+Some rows contain monthly summary information and thus are considered
+redundant. and are discarded
+```{r remove.non.event.rows}
+df <- df[ !grepl('^(summary|monthly|\\?)', df$event), ]
+```
+
+At this stage `df` can be considered ready for work, it's not yet tidy,
+we will get into tidying it in the context of our analysis.
+
+## Results
+### 1. Which type of the events are the most disastrous to population health?
+
+There are 2 informational columns that we need to explore, `fatalties` and `injuries`, and thus we get the top 8 events with the largest `fatalties + injuries` they are put into a vector named `events` ordered by severity.
+```{r get.events.health}
+dfa <- aggregate(fatalties + injuries ~ event, df, sum)
+events <- tail(dfa[order(dfa[,2]),"event"], 8)
+```
+
+We create a tidy data.frame named `health` with 3 columns 
+
+| Column    |    Type    |   Comment                            |
+|:---------:|:----------:|:-------------------------------------|
+| event     |   Factor   |   The original cleaned event         |
+| type      |   Factor   |   **fatalities** or **injuries**     |
+| count     |   Integer  |   Number of casualties               |
+```{r graph.health}
+df.events <- df[ df$event %in% events, ]
+df.evt.agg <- aggregate(cbind(fatalties, injuries) ~ event, df.events, sum, na.rm =TRUE)
+health <- melt(df.evt.agg, id.vars = 'event', value.name = 'count',
+          variable.name = 'type',measure.vars = c('fatalties', 'injuries') )
+````
+
+We plot a stacked bar of the `health` table
+````{r plot.health}
+health$event <-factor(health$event, levels = rev(events)) # Order ascending
+ggplot(health, aes(color, x = event, y = count, fill=type)) + geom_bar(stat="identity") +
+  ggtitle("Casualties by weather type") + coord_flip() + ylab("Casualties") + xlab("Weather type") + 
+  scale_fill_manual(values=c("#56B4E9", "#E69F00"), name="Casuality type",
+                   breaks=c("fatalties", "injuries"), labels=c("Fatality", "Injury"))
+```
+
+And it's immediately clear that __Tornedoes dwarf any of the other top 7 disasters__ in either of the casualty categories and the number of casualties for tornadoes are actually __greater than all the other force majeuress combined__.
+
+### 2. Which events cause worst economical consequences ?
+
+As mentioned above damages costs are described in 2 different columns, the damages themselves and the exponent (or unit) of measurement. The unit can be any of the following units `h - hundreds`, `k - thousand`, `m - million`, `b - billion` or a number from 0 to 9 indicating an exponent of 10. 
+
+There are also some garbage unit values `-`, `+` `?` and empty the string and due to lack of clear documentation on that matter they will be considered as a if the unit is 1. 
+
+```{r conversion.table}
+unit.to.multiplier <- setNames(c(100, 1e+03, 1e+06, 1e+09, (10 ^ (0:9))       ), 
+                               c('h',  'k',   'm',   'b',  as.character(0:9)) )
+real.cost <- function(dmg, unit) {
+  unit <- tolower(unit) 
+  (dmg * ifelse(unit %in% unit.to.multiplier, unit.to.multiplier[unit], 1)) / 1e+06
+}
+```
+
+
+Add 2 columns with the cost in million of US$.
+```{r add.real.damange.cols}
+df$prop.dmg.cost <- real.cost(df$prop.dmg, df$prop.dmg.unit)
+df$crop.dmg.cost <- real.cost(df$crop.dmg, df$crop.dmg.unit) 
+```
+
+As we did above we find the top 8 neutral disasters defined this time by 
+the combined costs of `crop damage` and `property damange` as set them 
+to `events` vector in order of gravity. 
+```{r get.events.costs}
+dfa <- aggregate(prop.dmg.cost + crop.dmg.cost ~ event, df, sum)
+events <- tail(dfa[order(dfa[,2]),"event"], 8)
+```
+
+We create a tidy data.frame named `dmg` with 3 columns 
+
+| Column    |    Type    |   Comment                             |
+|:---------:|:----------:|:--------------------------------------|
+| event     |   Factor   |   The original cleaned event          |
+| type      |   Factor   | **crop.dmp.cost** or **prop.dmg.cost**|
+| count     |   Integer  |   cost in millions of US$             |
+
+```{r graph.dmg}
+df.events <- df[ df$event %in% events, ]
+df.evt.agg <- aggregate(cbind(prop.dmg.cost, crop.dmg.cost) ~ event, df.events, sum, na.rm =TRUE)
+dmg <- melt(df.evt.agg, id.vars = 'event', value.name = 'count',
+          variable.name = 'type',measure.vars = c('crop.dmg.cost', 'prop.dmg.cost') )
+````
+
+We plot a stacked bar of the `dmg` data.frame
+````{r }
+dmg$event <-factor(dmg$event, levels = rev(events)) # Order ascending
+ggplot(dmg, aes(x = event, y = count, fill=type)) + geom_bar(stat="identity") +
+  ggtitle("Damage cost by weather type (Million US$)") + coord_flip() + xlab("Weather type") + ylab("Damage cost (Million US$) ") +
+  scale_fill_manual(values=c("#56B4E9", "#E69F00"), name="Damage type",
+                       breaks=c("crop.dmg.cost", "prop.dmg.cost"), labels=c("Crop", "Property"))
+```
+
+And unsurprisingly it is obvious that Tornadoes are at the top of the list 
+of harmful neutral disasters, albeit, this time it is a more closer 
+competition. 
+
+## Conclusions
+
+Our exploration has shown that Tornadoes are the top most neutral 
+disaster in the US with most severe impact on public health. Although their 
+economic impact is the gravest, the close second is also related to wind
+damage and they far surpass the events down the list namely, floods, 
+hail and lightning.
+
+However if we focus on crop damage water and storm related events seem to
+have the bigger share of the impact with hail caused crop damage almost 
+matches the combined crop damage of all the rest of the events.
+
+[1]: http://www.ncdc.noaa.gov/stormevents/pd01016005curr.pdf
+[2]: http://ire.org/nicar/database-library/databases/storm-events/
