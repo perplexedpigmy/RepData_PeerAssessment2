@@ -1,6 +1,6 @@
 ---
 title: "Tornado, worst weather disaster in the US"
-author: Table of Contents
+date: "`r format(Sys.time(), '%d %B, %Y')`"
 output: 
   html_document:
     keep_md: true
